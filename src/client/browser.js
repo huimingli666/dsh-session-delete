@@ -1,0 +1,282 @@
+/**
+ * dsh-session-delete browser half — runs inside the dsh web GUI.
+ *
+ * Renders a「删除会话」danger action in the conversation header's action row
+ * (the additive slot `conversation.session.header.actions`), confirms with a
+ * self-contained modal, calls the loopback-only host route, then navigates
+ * the GUI into a fresh session on success. Deletion propagates through the
+ * standard host relays (host/session-removed, host/workspace-changed,
+ * host/archived-sessions-changed), so the session row disappears without
+ * any shell patching.
+ *
+ * Deliberately plain React createElement + plain DOM for the modal/toasts:
+ * no JSX, no bundler, no private framework internals — nothing that could
+ * disturb the shell's reconciliation.
+ */
+var SessionDeleteBrowser = (() => {
+  'use strict'
+
+  const { useState, useCallback } = React
+
+  const DELETE_PATH = '/api/dsh-session-delete/delete'
+  const TOAST_TTL_MS = 8000
+
+  /* -------------------------------------------------------------- env */
+
+  /** Resolve the environment faces (injectable for tests). */
+  function resolveEnv(env) {
+    const win = env?.window ?? globalThis
+    const rawFetch = env?.fetch ?? win.fetch
+    return {
+      document: env?.document ?? globalThis.document,
+      window: win,
+      // fetch is an unforgeable Window method in Chromium — bind it so the
+      // bare reference is callable.
+      fetch: typeof rawFetch === 'function' ? rawFetch.bind(win) : rawFetch,
+      setTimeout: typeof win.setTimeout === 'function' ? win.setTimeout.bind(win) : (() => 0),
+      clearTimeout: typeof win.clearTimeout === 'function' ? win.clearTimeout.bind(win) : (() => {}),
+      onNavigateAway: env?.onNavigateAway ?? (() => {}),
+    }
+  }
+
+  /* ------------------------------------------------------------- toast */
+
+  /** Lightweight toast stack (fixed bottom-right, auto-dismiss). */
+  function toast(env, title, detail, kind = 'info') {
+    try {
+      const doc = env.document
+      if (doc === undefined) return
+      let container = doc.querySelector('[data-dsh-session-delete-toasts]')
+      if (container === null) {
+        container = doc.createElement('div')
+        container.dataset.dshSessionDeleteToasts = ''
+        Object.assign(container.style, {
+          position: 'fixed', right: '16px', bottom: '16px', zIndex: '2147483000',
+          display: 'flex', flexDirection: 'column', gap: '8px', maxWidth: '360px',
+        })
+        doc.body.appendChild(container)
+      }
+      const card = doc.createElement('div')
+      card.dataset.dshSessionDeleteToast = ''
+      const accent = kind === 'error' ? '#e5484d' : kind === 'success' ? '#30a46c' : '#3b82f6'
+      Object.assign(card.style, {
+        background: '#1c1c1e', color: '#f5f5f7', borderRadius: '10px',
+        padding: '10px 12px', boxShadow: '0 8px 24px rgba(0,0,0,.35)',
+        borderLeft: `4px solid ${accent}`, font: '13px/1.5 system-ui, sans-serif',
+      })
+      const head = doc.createElement('div')
+      head.style.fontWeight = '600'
+      head.textContent = title
+      card.appendChild(head)
+      if (detail !== undefined && detail !== '') {
+        const body = doc.createElement('div')
+        body.style.opacity = '.85'
+        body.style.whiteSpace = 'pre-wrap'
+        body.style.wordBreak = 'break-all'
+        body.textContent = detail
+        card.appendChild(body)
+      }
+      container.appendChild(card)
+      env.setTimeout(() => card.remove(), TOAST_TTL_MS)
+    } catch {
+      /* toast must never break the flow */
+    }
+  }
+
+  /* ------------------------------------------------------------- modal */
+
+  /** Self-contained danger-confirm modal; resolves true/false. Never throws. */
+  function confirmDelete(env, { title, message, confirmLabel }) {
+    return new Promise((resolve) => {
+      try {
+        const doc = env.document
+        if (doc === undefined) { resolve(false); return }
+        const overlay = doc.createElement('div')
+        overlay.dataset.dshSessionDeleteModal = ''
+        Object.assign(overlay.style, {
+          position: 'fixed', inset: '0', zIndex: '2147483500',
+          background: 'rgba(0,0,0,.55)', display: 'flex', alignItems: 'center',
+          justifyContent: 'center',
+        })
+        const card = doc.createElement('div')
+        Object.assign(card.style, {
+          background: '#1c1c1e', color: '#f5f5f7', borderRadius: '14px',
+          boxShadow: '0 16px 48px rgba(0,0,0,.5)', width: 'min(420px, calc(100vw - 32px))',
+          padding: '20px', font: '13px/1.6 system-ui, sans-serif',
+        })
+        const head = doc.createElement('div')
+        head.style.cssText = 'font-size:15px;font-weight:600;color:#ff6b6b;margin-bottom:8px'
+        head.textContent = title
+        card.appendChild(head)
+        const msg = doc.createElement('div')
+        msg.style.cssText = 'color:#e8e8ea;white-space:pre-wrap;margin-bottom:18px'
+        msg.textContent = message
+        card.appendChild(msg)
+        const row = doc.createElement('div')
+        row.style.cssText = 'display:flex;justify-content:flex-end;gap:10px'
+        const cancel = doc.createElement('button')
+        cancel.type = 'button'
+        cancel.textContent = '取消'
+        cancel.style.cssText = 'border:1px solid rgba(128,128,128,.4);background:transparent;color:#e8e8ea;border-radius:8px;padding:7px 16px;cursor:pointer;font:inherit'
+        const confirm = doc.createElement('button')
+        confirm.type = 'button'
+        confirm.textContent = confirmLabel ?? '永久删除'
+        confirm.style.cssText = 'border:0;background:#d9363e;color:#fff;border-radius:8px;padding:7px 16px;cursor:pointer;font:inherit;font-weight:600'
+        row.appendChild(cancel)
+        row.appendChild(confirm)
+        card.appendChild(row)
+        overlay.appendChild(card)
+        doc.body.appendChild(overlay)
+
+        let done = false
+        const close = (value) => {
+          if (done) return
+          done = true
+          overlay.remove()
+          resolve(value)
+        }
+        cancel.addEventListener('click', () => close(false))
+        confirm.addEventListener('click', () => close(true))
+        overlay.addEventListener('click', (event) => {
+          if (event.target === overlay) close(false)
+        })
+        doc.addEventListener('keydown', onKey)
+        function onKey(event) {
+          if (event.key === 'Escape') { doc.removeEventListener('keydown', onKey); close(false) }
+        }
+      } catch {
+        resolve(false)
+      }
+    })
+  }
+
+  /* ---------------------------------------------------------- component */
+
+  const TRASH_ICON = '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 4.5h11"/><path d="M6 2.5h4"/><path d="M4 4.5v9a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1v-9"/><path d="M6.5 7v4"/><path d="M9.5 7v4"/></svg>'
+
+  const buttonStyle = {
+    appearance: 'none', border: '0', background: 'transparent', cursor: 'pointer',
+    color: 'var(--dsw-alias-label-tertiary, #9ca3af)', borderRadius: '7px',
+    padding: '6px', display: 'inline-flex', lineHeight: '0',
+  }
+  const buttonDangerHover = { color: 'var(--dsw-alias-state-error-primary, #f87171)' }
+
+  /**
+   * The header action button. Props come from the slot kit: `sessionId` plus
+   * framework hooks; `promptDelete` comes from the plugin inject face.
+   */
+  function DeleteButton({ sessionId, useSessions, promptDelete }) {
+    const [busy, setBusy] = useState(false)
+    // Hide for blank (fresh, never-conversation) sessions when the kit
+    // exposes them; a missing hook degrades to always visible.
+    let blank = false
+    try {
+      if (typeof useSessions === 'function') {
+        blank = Boolean(useSessions((state) => state.byId?.[sessionId]?.blank))
+      }
+    } catch { /* kit version differences — ignore */ }
+    const onClick = useCallback(async () => {
+      if (busy || sessionId === undefined) return
+      setBusy(true)
+      try {
+        await promptDelete(sessionId)
+      } finally {
+        setBusy(false)
+      }
+    }, [busy, sessionId, promptDelete])
+
+    if (blank || sessionId === undefined) return null
+    return React.createElement('button', {
+      type: 'button',
+      'aria-label': '删除会话',
+      title: '删除会话（不可恢复）',
+      style: { ...buttonStyle, ...(busy ? { opacity: '.5', cursor: 'default' } : {}) },
+      onMouseEnter: (event) => { Object.assign(event.currentTarget.style, buttonDangerHover) },
+      onMouseLeave: (event) => { Object.assign(event.currentTarget.style, { color: 'var(--dsw-alias-label-tertiary, #9ca3af)' }) },
+      onClick,
+      dangerouslySetInnerHTML: { __html: TRASH_ICON },
+    })
+  }
+
+  /* -------------------------------------------------------------- apply */
+
+  /**
+   * Plugin apply: register the header action. `env` override is for tests.
+   */
+  function browserApply(ctx, envOverride) {
+    try {
+      return browserApplyInner(ctx, envOverride)
+    } catch (error) {
+      // Fail-degrade, never break the GUI.
+      console.error('[dsh-session-delete] browser apply failed (plugin disabled):', error, error?.stack)
+    }
+  }
+
+  function browserApplyInner(ctx, envOverride) {
+    // On success the current session is gone — move the view into a fresh
+    // session (same workspace when possible) via the client workspaces kit.
+    const defaultNavigateAway = () => {
+      try {
+        if (typeof ctx?.workspaces?.startSession === 'function') ctx.workspaces.startSession()
+      } catch {
+        /* navigation best-effort */
+      }
+    }
+    const env = resolveEnv({
+      ...(envOverride ?? {}),
+      onNavigateAway: envOverride?.onNavigateAway ?? defaultNavigateAway,
+    })
+
+    const promptDelete = async (sessionId) => {
+      const ok = await confirmDelete(env, {
+        title: '删除会话',
+        message: '将永久删除该会话及其全部消息记录、任务状态与磁盘日志（~/.dsh/sessions 下对应目录）。\n\n此操作不可恢复，确定继续吗？',
+        confirmLabel: '永久删除',
+      })
+      if (!ok) return
+      let report
+      try {
+        if (typeof env.fetch !== 'function') throw new Error('fetch 不可用')
+        const response = await env.fetch(DELETE_PATH, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ sessionId }),
+        })
+        report = await response.json()
+      } catch (cause) {
+        toast(env, '删除失败', '请求出错：' + (cause?.message ?? String(cause)), 'error')
+        return
+      }
+      if (!report || report.ok !== true) {
+        toast(env, '无法删除会话', report?.message ?? '未知错误', 'error')
+        return
+      }
+      toast(env, '已删除会话', report.sessionId, 'success')
+      // The GUI already dropped the row via host/session-removed; move the
+      // current view into a fresh session.
+      try {
+        env.onNavigateAway()
+      } catch {
+        /* navigation best-effort */
+      }
+    }
+
+    let registers = []
+    try {
+      registers = ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({
+        name: 'conversation.session.header.actions',
+        id: 'session-delete',
+        order: 200,
+        inject: () => ({ promptDelete }),
+      }, DeleteButton))
+    } catch (error) {
+      console.error('[dsh-session-delete] header action registration failed:', error)
+    }
+
+    ctx?.effect?.(() => () => {
+      for (const dispose of registers) { try { dispose() } catch { /* ignore */ } }
+    }, 'dsh-session-delete: browser surfaces')
+  }
+
+  return { browserApply, confirmDelete, toast }
+})()

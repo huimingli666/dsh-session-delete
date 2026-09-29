@@ -1,0 +1,48 @@
+{
+  "name": "@dsh-plugins/dsh-session-delete",
+  "version": "0.1.0",
+  "description": "Adds a true delete-session capability to the dsh web GUI (today only rename / fork / archive exist): a per-session danger action in the conversation header that removes the session's workspace accounting, archive-set entry, in-memory store row, and its durable event log on disk. Running sessions are refused for safety.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": {
+      "default": "./src/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "files": [
+    "lib",
+    "src",
+    "cordis.patch.yml",
+    "scripts",
+    "test",
+    "README.md"
+  ],
+  "engines": {
+    "node": "^22.0.0 || >=24.0.0"
+  },
+  "scripts": {
+    "build:client": "node scripts/build-client.mjs",
+    "test": "node --test test/*.test.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/huimingli666/dsh-session-delete.git"
+  },
+  "homepage": "https://github.com/huimingli666/dsh-session-delete#readme",
+  "bugs": {
+    "url": "https://github.com/huimingli666/dsh-session-delete/issues"
+  },
+  "license": "MIT"
+}
