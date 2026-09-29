@@ -1,5 +1,7 @@
 # dsh-session-delete
 
+[![CI](https://github.com/huimingli666/dsh-session-delete/actions/workflows/ci.yml/badge.svg)](https://github.com/huimingli666/dsh-session-delete/actions/workflows/ci.yml)
+
 为 DSH（DeepSeek Harness）Web 界面新增**真正的“删除会话”能力**。
 
 DSH 会话管理原本只支持：重命名、分叉（fork）、归档（archive）。归档只是把会话
@@ -115,4 +117,8 @@ node scripts/build-client.mjs   # 重新生成 lib/client.js
   是 ui-workspace 内部固定组件，没有官方扩展点，本插件不采用脆弱的 DOM 注入改它；
 - 删除会话时若其仍在 GUI 打开，删除成功后当前视图会切换到新会话；
 - 归档集合清理依赖 `@deepseek-ai/dsh-workspace` 原型补丁，若未来 dsh 改动该类内部
-  结构，该步骤降级为警告，其它删除步骤不受影响。
+  结构，该步骤降级为警告，其它删除步骤不受影响；
+- 版本兼容：插件不锁宿主版本，但在 dsh 0.1.x 上开发与测试；依赖官方会话头部操作
+  插槽 `conversation.session.header.actions`、`webServer` 路由注册、
+  `sessionPersistence` 与既有 `host/*` 广播（官方 web profile 默认具备）。
+  Node 运行时要求见 `engines`（`^22.0.0 || >=24.0.0`）。
